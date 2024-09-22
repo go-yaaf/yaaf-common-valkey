@@ -1,0 +1,12 @@
+# https://docs.docker.com/compose/yml/
+# This docker-compose is used to create a local environment with all the required middleware
+# services for testing and debugging the SUT (System Under Test)
+# In this case, the SUT is yaaf-common-valkey.
+
+version: '3.9'
+services:
+  valkey:
+    image: valkey/valkey:8.0.0
+    restart: always
+    ports:
+      - "6379:6379"

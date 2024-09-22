@@ -4,6 +4,7 @@
 package facilities
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -16,11 +17,14 @@ import (
 // GetRaw gets the value of a key in a byte array format
 func (r *ValkeyAdapter) GetRaw(key string) ([]byte, error) {
 	var bytes []byte
-	cmd := r.rc.Get(r.ctx, key)
-	if err := cmd.Err(); err != nil {
+
+	cmd := r.rc.B().Get().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+
+	if err := res.Error(); err != nil {
 		return nil, err
 	} else {
-		if bytes, err = cmd.Bytes(); err != nil {
+		if bytes, err = res.AsBytes(); err != nil {
 			return nil, err
 		} else {
 			return bytes, nil
@@ -40,9 +44,13 @@ func (r *ValkeyAdapter) Get(factory EntityFactory, key string) (Entity, error) {
 // SetRaw sets value of key in a byte array format
 func (r *ValkeyAdapter) SetRaw(key string, bytes []byte, expiration ...time.Duration) error {
 	if len(expiration) > 0 {
-		return r.rc.Set(r.ctx, key, bytes, expiration[0]).Err()
+		cmd := r.rc.B().Set().Key(key).Value(string(bytes)).Ex(expiration[0]).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		return res.Error()
 	} else {
-		return r.rc.Set(r.ctx, key, bytes, 0).Err()
+		cmd := r.rc.B().Set().Key(key).Value(string(bytes)).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		return res.Error()
 	}
 }
 
@@ -66,31 +74,37 @@ func (r *ValkeyAdapter) SetNX(key string, entity Entity, expiration ...time.Dura
 
 // SetRawNX sets bytes value of key only if it is not exist with optional expiration, return false if the key exists
 func (r *ValkeyAdapter) SetRawNX(key string, bytes []byte, expiration ...time.Duration) (bool, error) {
-	var exp time.Duration = 0
+
+	cmd := r.rc.B().Set().Key(key).Value(string(bytes)).Build()
 	if len(expiration) > 0 {
-		exp = expiration[0]
+		cmd = r.rc.B().Set().Key(key).Value(string(bytes)).Ex(expiration[0]).Build()
 	}
-	return r.rc.SetNX(r.ctx, key, bytes, exp).Result()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsBool()
 }
 
 // Del Delete keys
 func (r *ValkeyAdapter) Del(keys ...string) error {
-	return r.rc.Del(r.ctx, keys...).Err()
+	cmd := r.rc.B().Del().Key(keys...).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.Error()
 }
 
 // GetKeys Get the value of all the given keys
 func (r *ValkeyAdapter) GetKeys(factory EntityFactory, keys ...string) ([]Entity, error) {
-	cmd := r.rc.MGet(r.ctx, keys...)
-	if cmd.Err() != nil {
-		return nil, cmd.Err()
+
+	cmd := r.rc.B().Mget().Key(keys...).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	if res.Error() != nil {
+		return nil, res.Error()
 	}
 
-	if list, err := cmd.Result(); err != nil {
+	if list, err := res.AsStrSlice(); err != nil {
 		return nil, err
 	} else {
 		entities := make([]Entity, 0)
-		for _, item := range list {
-			if entity, err := rawToEntity(factory, item.([]byte)); err == nil {
+		for _, str := range list {
+			if entity, er := rawToEntity(factory, []byte(str)); er == nil {
 				entities = append(entities, entity)
 			}
 		}
@@ -100,17 +114,19 @@ func (r *ValkeyAdapter) GetKeys(factory EntityFactory, keys ...string) ([]Entity
 
 // GetRawKeys Get the value of all the given keys
 func (r *ValkeyAdapter) GetRawKeys(keys ...string) ([]Tuple[string, []byte], error) {
-	cmd := r.rc.MGet(r.ctx, keys...)
-	if cmd.Err() != nil {
-		return nil, cmd.Err()
+
+	cmd := r.rc.B().Mget().Key(keys...).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	if res.Error() != nil {
+		return nil, res.Error()
 	}
 
-	if list, err := cmd.Result(); err != nil {
+	if list, err := res.AsStrSlice(); err != nil {
 		return nil, err
 	} else {
 		tuples := make([]Tuple[string, []byte], 0)
-		for i, item := range list {
-			tuple := Tuple[string, []byte]{Key: fmt.Sprintf("%d", i), Value: item.([]byte)}
+		for i, str := range list {
+			tuple := Tuple[string, []byte]{Key: fmt.Sprintf("%d", i), Value: []byte(str)}
 			tuples = append(tuples, tuple)
 		}
 		return tuples, nil
@@ -119,11 +135,10 @@ func (r *ValkeyAdapter) GetRawKeys(keys ...string) ([]Tuple[string, []byte], err
 
 // AddRaw Set the byte array value of a key only if the key does not exist
 func (r *ValkeyAdapter) AddRaw(key string, bytes []byte, expiration time.Duration) (bool, error) {
-	if cmd := r.rc.SetNX(r.ctx, key, bytes, expiration); cmd.Err() != nil {
-		return false, cmd.Err()
-	} else {
-		return cmd.Result()
-	}
+
+	cmd := r.rc.B().Setnx().Key(key).Value(string(bytes)).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsBool()
 }
 
 // Add Set the value of a key only if the key does not exist
@@ -137,30 +152,33 @@ func (r *ValkeyAdapter) Add(key string, entity Entity, expiration time.Duration)
 
 // Rename a key
 func (r *ValkeyAdapter) Rename(key string, newKey string) error {
-	return r.rc.Rename(r.ctx, key, newKey).Err()
+
+	cmd := r.rc.B().Rename().Key(key).Newkey(newKey).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.Error()
 }
 
 // Scan keys from the provided cursor
 func (r *ValkeyAdapter) Scan(from uint64, match string, count int64) (keys []string, cursor uint64, err error) {
-	scanCmd := r.rc.Scan(r.ctx, from, match, count)
-	if err = scanCmd.Err(); err != nil {
-		return nil, 0, err
+
+	if len(match) == 0 {
+		match = "*"
+	}
+
+	cmd := r.rc.B().Scan().Cursor(from).Match(match).Count(count).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	if se, er := res.AsScanEntry(); er != nil {
+		return nil, 0, res.Error()
 	} else {
-		if list, cur, er := scanCmd.Result(); er != nil {
-			return nil, 0, er
-		} else {
-			return list, cur, nil
-		}
+		return se.Elements, se.Cursor, nil
 	}
 }
 
 // Exists Check if key exists
 func (r *ValkeyAdapter) Exists(key string) (result bool, err error) {
-	if cmd := r.rc.Exists(r.ctx, key); cmd.Err() != nil {
-		return false, cmd.Err()
-	} else {
-		return cmd.Val() > 0, nil
-	}
+	cmd := r.rc.B().Exists().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsBool()
 }
 
 // endregion
@@ -178,34 +196,29 @@ func (r *ValkeyAdapter) HGet(factory EntityFactory, key, field string) (Entity, 
 
 // HGetRaw gets the rae value of a hash field
 func (r *ValkeyAdapter) HGetRaw(key, field string) ([]byte, error) {
-	cmd := r.rc.HGet(r.ctx, key, field)
-	if cmd.Err() != nil {
-		return nil, cmd.Err()
-	} else {
-		if bytes, err := cmd.Bytes(); err != nil {
-			return nil, err
-		} else {
-			return bytes, nil
-		}
-	}
+	cmd := r.rc.B().Hget().Key(key).Field(field).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsBytes()
 }
 
 // HKeys Get all the fields in a hash
 func (r *ValkeyAdapter) HKeys(key string) ([]string, error) {
-	if cmd := r.rc.HKeys(r.ctx, key); cmd.Err() != nil {
-		return nil, cmd.Err()
-	} else {
-		return cmd.Val(), nil
-	}
+	cmd := r.rc.B().Hkeys().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsStrSlice()
 }
 
 // HGetAll Get all the fields and values in a hash
 func (r *ValkeyAdapter) HGetAll(factory EntityFactory, key string) (map[string]Entity, error) {
-	if cmd := r.rc.HGetAll(r.ctx, key); cmd.Err() != nil {
-		return nil, cmd.Err()
+	cmd := r.rc.B().Hgetall().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+
+	result := make(map[string]Entity)
+
+	if list, err := res.AsStrMap(); err != nil {
+		return nil, err
 	} else {
-		result := make(map[string]Entity)
-		for k, str := range cmd.Val() {
+		for k, str := range list {
 			if entity, er := rawToEntity(factory, []byte(str)); er == nil {
 				result[k] = entity
 			}
@@ -216,11 +229,15 @@ func (r *ValkeyAdapter) HGetAll(factory EntityFactory, key string) (map[string]E
 
 // HGetRawAll gets all the fields and raw values in a hash
 func (r *ValkeyAdapter) HGetRawAll(key string) (map[string][]byte, error) {
-	if cmd := r.rc.HGetAll(r.ctx, key); cmd.Err() != nil {
-		return nil, cmd.Err()
+	cmd := r.rc.B().Hgetall().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+
+	result := make(map[string][]byte)
+
+	if list, err := res.AsStrMap(); err != nil {
+		return nil, err
 	} else {
-		result := make(map[string][]byte)
-		for k, str := range cmd.Val() {
+		for k, str := range list {
 			result[k] = []byte(str)
 		}
 		return result, nil
@@ -229,16 +246,21 @@ func (r *ValkeyAdapter) HGetRawAll(key string) (map[string][]byte, error) {
 
 // HSet Set the value of a hash field
 func (r *ValkeyAdapter) HSet(key, field string, entity Entity) error {
+
 	if bytes, err := entityToRaw(entity); err != nil {
 		return err
 	} else {
-		return r.rc.HSet(r.ctx, key, field, bytes).Err()
+		cmd := r.rc.B().Hset().Key(key).FieldValue().FieldValue(field, string(bytes)).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		return res.Error()
 	}
 }
 
 // HSetRaw sets the raw value of a hash field
 func (r *ValkeyAdapter) HSetRaw(key, field string, bytes []byte) error {
-	return r.rc.HSet(r.ctx, key, field, bytes).Err()
+	cmd := r.rc.B().Hset().Key(key).FieldValue().FieldValue(field, string(bytes)).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.Error()
 }
 
 // HSetNX Set value of key only if it is not exist with optional expiration, return false if the key exists
@@ -246,18 +268,24 @@ func (r *ValkeyAdapter) HSetNX(key string, field string, entity Entity) (bool, e
 	if bytes, err := entityToRaw(entity); err != nil {
 		return false, err
 	} else {
-		return r.rc.HSetNX(r.ctx, key, field, bytes).Result()
+		cmd := r.rc.B().Hsetnx().Key(key).Field(field).Value(string(bytes)).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		return res.AsBool()
 	}
 }
 
 // HSetRawNX sets the raw value of key only if it is not exist with optional expiration, return false if the key exists
 func (r *ValkeyAdapter) HSetRawNX(key string, field string, bytes []byte) (bool, error) {
-	return r.rc.HSetNX(r.ctx, key, field, bytes).Result()
+	cmd := r.rc.B().Hsetnx().Key(key).Field(field).Value(string(bytes)).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsBool()
 }
 
 // HDel Delete one or more hash fields
 func (r *ValkeyAdapter) HDel(key string, fields ...string) error {
-	return r.rc.HDel(r.ctx, key, fields...).Err()
+	cmd := r.rc.B().Hdel().Key(key).Field(fields...).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.Error()
 }
 
 // HAdd sets the value of a key only if the key does not exist
@@ -265,30 +293,24 @@ func (r *ValkeyAdapter) HAdd(key, field string, entity Entity) (bool, error) {
 	if bytes, err := entityToRaw(entity); err != nil {
 		return false, err
 	} else {
-		if err = r.rc.HSetNX(r.ctx, key, field, bytes).Err(); err != nil {
-			return false, err
-		} else {
-			return true, nil
-		}
+		cmd := r.rc.B().Hsetnx().Key(key).Field(field).Value(string(bytes)).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		return res.AsBool()
 	}
 }
 
 // HAddRaw sets the raw value of a key only if the key does not exist
 func (r *ValkeyAdapter) HAddRaw(key, field string, bytes []byte) (bool, error) {
-	if err := r.rc.HSetNX(r.ctx, key, field, bytes).Err(); err != nil {
-		return false, err
-	} else {
-		return true, nil
-	}
+	cmd := r.rc.B().Hsetnx().Key(key).Field(field).Value(string(bytes)).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsBool()
 }
 
 // HExists Check if key exists
 func (r *ValkeyAdapter) HExists(key, field string) (bool, error) {
-	if cmd := r.rc.HExists(r.ctx, key, field); cmd.Err() != nil {
-		return false, cmd.Err()
-	} else {
-		return cmd.Val(), nil
-	}
+	cmd := r.rc.B().Hexists().Key(key).Field(field).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.AsBool()
 }
 
 // endregion
@@ -297,96 +319,140 @@ func (r *ValkeyAdapter) HExists(key, field string) (bool, error) {
 
 // RPush Append one or multiple values to a list
 func (r *ValkeyAdapter) RPush(key string, value ...Entity) error {
-	values := make([]interface{}, 0)
+	values := make([]string, 0)
 	for _, v := range value {
-		values = append(values, v)
+
+		if bytes, err := entityToRaw(v); err != nil {
+			continue
+		} else {
+			values = append(values, string(bytes))
+		}
 	}
-	return r.rc.RPush(r.ctx, key, values...).Err()
+	cmd := r.rc.B().Rpush().Key(key).Element(values...).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.Error()
 }
 
 // LPush Prepend one or multiple values to a list
 func (r *ValkeyAdapter) LPush(key string, value ...Entity) error {
-	values := make([]interface{}, 0)
+	values := make([]string, 0)
 	for _, v := range value {
-		values = append(values, v)
+
+		if bytes, err := entityToRaw(v); err != nil {
+			continue
+		} else {
+			values = append(values, string(bytes))
+		}
 	}
-	return r.rc.LPush(r.ctx, key, values...).Err()
+	cmd := r.rc.B().Lpush().Key(key).Element(values...).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	return res.Error()
 }
 
 // RPop Remove and get the last element in a list
 func (r *ValkeyAdapter) RPop(factory EntityFactory, key string) (Entity, error) {
-	if cmd := r.rc.RPop(r.ctx, key); cmd.Err() != nil {
-		return nil, cmd.Err()
+
+	cmd := r.rc.B().Rpop().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+
+	if bytes, err := res.AsBytes(); err != nil {
+		return nil, err
 	} else {
-		if bytes, err := cmd.Bytes(); err != nil {
-			return nil, err
-		} else {
-			return rawToEntity(factory, bytes)
-		}
+		return rawToEntity(factory, bytes)
 	}
 }
 
 // LPop Remove and get the first element in a list
 func (r *ValkeyAdapter) LPop(factory EntityFactory, key string) (entity Entity, err error) {
-	if cmd := r.rc.LPop(r.ctx, key); cmd.Err() != nil {
-		return nil, cmd.Err()
+	cmd := r.rc.B().Lpop().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+
+	if bytes, err := res.AsBytes(); err != nil {
+		return nil, err
 	} else {
-		if bytes, er := cmd.Bytes(); er != nil {
-			return nil, er
-		} else {
-			return rawToEntity(factory, bytes)
-		}
+		return rawToEntity(factory, bytes)
 	}
 }
 
 // BRPop Remove and get the last element in a list or block until one is available
 func (r *ValkeyAdapter) BRPop(factory EntityFactory, timeout time.Duration, keys ...string) (key string, entity Entity, err error) {
-	if cmd := r.rc.BRPop(r.ctx, timeout, keys...); cmd.Err() != nil {
-		return "", nil, err
-	} else {
-		if result, er := cmd.Result(); er != nil {
+
+	cmd := r.rc.B().Brpop().Key(keys...).Timeout(float64(timeout)).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	if res.Error() != nil {
+		return "", nil, res.Error()
+	}
+
+	/*
+		if cmd := r.rc.BRPop(r.ctx, timeout, keys...); cmd.Err() != nil {
 			return "", nil, err
 		} else {
-			key = result[0]
-			entity, err = rawToEntity(factory, []byte(result[1]))
-			return
+			if result, er := cmd.Result(); er != nil {
+				return "", nil, err
+			} else {
+				key = result[0]
+				entity, err = rawToEntity(factory, []byte(result[1]))
+				return
+			}
 		}
-	}
+
+	*/
+	return "", nil, fmt.Errorf("not implemented yet")
 }
 
 // BLPop Remove and get the first element in a list or block until one is available
 func (r *ValkeyAdapter) BLPop(factory EntityFactory, timeout time.Duration, keys ...string) (key string, entity Entity, err error) {
-	if cmd := r.rc.BLPop(r.ctx, timeout, keys...); cmd.Err() != nil {
-		return "", nil, err
-	} else {
-		if result, er := cmd.Result(); er != nil {
+
+	cmd := r.rc.B().Blpop().Key(keys...).Timeout(float64(timeout)).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	if res.Error() != nil {
+		return "", nil, res.Error()
+	}
+
+	/*
+		if cmd := r.rc.BLPop(r.ctx, timeout, keys...); cmd.Err() != nil {
 			return "", nil, err
 		} else {
-			key = result[0]
-			entity, err = rawToEntity(factory, []byte(result[1]))
-			return
+			if result, er := cmd.Result(); er != nil {
+				return "", nil, err
+			} else {
+				key = result[0]
+				entity, err = rawToEntity(factory, []byte(result[1]))
+				return
+			}
 		}
-	}
+
+	*/
+	return "", nil, fmt.Errorf("not implemented yet")
 }
 
 // LRange Get a range of elements from list
 func (r *ValkeyAdapter) LRange(factory EntityFactory, key string, start, stop int64) ([]Entity, error) {
-	if list, err := r.rc.LRange(r.ctx, key, start, stop).Result(); err != nil {
+	cmd := r.rc.B().Lrange().Key(key).Start(start).Stop(stop).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	list, err := res.AsStrSlice()
+	if err != nil {
 		return nil, err
-	} else {
-		result := make([]Entity, 0)
-		for _, str := range list {
-			if entity, err := rawToEntity(factory, []byte(str)); err == nil {
-				result = append(result, entity)
-			}
-		}
-		return result, nil
 	}
+
+	result := make([]Entity, 0)
+	for _, str := range list {
+		if entity, er := rawToEntity(factory, []byte(str)); er == nil {
+			result = append(result, entity)
+		}
+	}
+	return result, nil
 }
 
 // LLen Get the length of a list
 func (r *ValkeyAdapter) LLen(key string) (result int64) {
-	return r.rc.LLen(r.ctx, key).Val()
+	cmd := r.rc.B().Llen().Key(key).Build()
+	res := r.rc.Do(context.Background(), cmd)
+	if rt, err := res.AsInt64(); err != nil {
+		return 0
+	} else {
+		return rt
+	}
 }
 
 // endregion
@@ -395,18 +461,8 @@ func (r *ValkeyAdapter) LLen(key string) (result int64) {
 
 // ObtainLocker tries to obtain a new lock using a key with the given TTL
 func (r *ValkeyAdapter) ObtainLocker(key string, ttl time.Duration) (ILocker, error) {
-	// Create a random token
-	token := ID()
-
-	if ok, err := r.SetRawNX(key, []byte(token), ttl); err != nil {
-		return nil, err
-	} else {
-		if ok {
-			return &Locker{rc: r.rc, key: key, token: token}, nil
-		} else {
-			return nil, fmt.Errorf("locker key already exists")
-		}
-	}
+	// Create locker
+	return createNewLocker(r.uri, key, ttl)
 }
 
 // endregion

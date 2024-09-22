@@ -6,9 +6,9 @@ package facilities
 import (
 	"context"
 	"fmt"
-	"github.com/redis/go-redis/v9"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,7 +27,7 @@ type subscriber struct {
 }
 
 type ValkeyAdapter struct {
-	rc   *valkey.Client
+	rc   valkey.Client
 	ctx  context.Context
 	subs map[string]subscriber
 	sync.RWMutex
@@ -42,12 +42,12 @@ type ValkeyAdapter struct {
 // param: URI - represents the Valkey connection string in the format of: valkey://user:password@host:port
 // return: IDataCache instance, error
 func NewValkeyDataCache(URI string) (dbs database.IDataCache, error error) {
-
-	if redisClient, err := getValkeyClient(URI); err != nil {
+	URI = strings.Replace(URI, "valkey://", "redis://", -1)
+	if valkeyClient, err := getValkeyClient(URI); err != nil {
 		return nil, err
 	} else {
 		return &ValkeyAdapter{
-			rc:   redisClient,
+			rc:   valkeyClient,
 			subs: make(map[string]subscriber),
 			ctx:  context.Background(),
 			uri:  URI,
@@ -57,10 +57,11 @@ func NewValkeyDataCache(URI string) (dbs database.IDataCache, error error) {
 
 // NewValkeyMessageBus factory method for Valkey IMessageBus implementation
 //
-// param: URI - represents the redis connection string in the format of: redis://user:password@host:port
+// param: URI - represents the Valkey connection string in the format of: valkey://user:password@host:port
 // return: IDataCache instance, error
 func NewValkeyMessageBus(URI string) (mq IMessageBus, error error) {
 
+	URI = strings.Replace(URI, "valkey://", "redis://", -1)
 	if valkeyClient, err := getValkeyClient(URI); err != nil {
 		return nil, err
 	} else {
@@ -76,14 +77,13 @@ func NewValkeyMessageBus(URI string) (mq IMessageBus, error error) {
 func (r *ValkeyAdapter) Ping(retries uint, intervalInSeconds uint) error {
 
 	if r.rc == nil {
-		return fmt.Errorf("redis client not initialized")
+		return fmt.Errorf("valkey client not initialized")
 	}
 
-	r.rc.
-		ctx := context.Background()
+	cmd := r.rc.B().Ping().Build()
+
 	for i := 0; i < int(retries); i++ {
-		status := r.rc.Ping(ctx)
-		if status.Err() == nil {
+		if res := r.rc.Do(context.Background(), cmd); res.Error() == nil {
 			return nil
 		}
 		time.Sleep(time.Second * time.Duration(intervalInSeconds))
@@ -94,7 +94,8 @@ func (r *ValkeyAdapter) Ping(retries uint, intervalInSeconds uint) error {
 // Close cache and free resources
 func (r *ValkeyAdapter) Close() error {
 	if r.rc != nil {
-		return r.rc.Close()
+		r.rc.Close()
+		return nil
 	} else {
 		return nil
 	}
@@ -102,7 +103,7 @@ func (r *ValkeyAdapter) Close() error {
 
 // CloneDataCache creates a clone of this instance
 func (r *ValkeyAdapter) CloneDataCache() (dbs database.IDataCache, err error) {
-	return NewValkeyMessageBus(r.uri)
+	return NewValkeyDataCache(r.uri)
 }
 
 // CloneMessageBus creates a clone of this instance
@@ -114,25 +115,30 @@ func (r *ValkeyAdapter) CloneMessageBus() (dbs IMessageBus, err error) {
 
 // region PRIVATE SECTION ----------------------------------------------------------------------------------------------
 
-// Get native redis client and provide client name
-func getValkeyClient(URI string) (*valkey.Client, error) {
+// Get native Valkey client and provide client name
+func getValkeyClient(URI string) (valkey.Client, error) {
 
 	if options, err := valkey.ParseURL(URI); err != nil {
 		return nil, err
 	} else {
-		// Create Redis client and set client name
-		redisClient := valkey.NewClient(options)
-
-		if redisClient == nil {
-			return nil, fmt.Errorf("can't create client")
-		} else {
-			clientName := fmt.Sprintf("_:%d", os.Getegid())
-			if path, er := os.Executable(); er == nil {
-				clientName = fmt.Sprintf("%s:%d", filepath.Base(path), os.Getegid())
-			}
-			_ = redisClient.Do(context.Background(), "CLIENT", "SETNAME", clientName)
-			return redisClient, nil
+		// Create Valkey client and set client name
+		valkeyClient, er := valkey.NewClient(options)
+		if er != nil {
+			return nil, fmt.Errorf("can't create Valkey client: %s", er.Error())
 		}
+		if valkeyClient == nil {
+			return nil, fmt.Errorf("valkey client is nil")
+		}
+
+		clientName := fmt.Sprintf("_:%d", os.Getegid())
+		if path, er2 := os.Executable(); er2 == nil {
+			clientName = fmt.Sprintf("%s:%d", filepath.Base(path), os.Getegid())
+		}
+		fmt.Println(clientName)
+
+		cmd := valkeyClient.B().ClientSetname().ConnectionName(clientName).Build()
+		_ = valkeyClient.Do(context.Background(), cmd)
+		return valkeyClient, nil
 	}
 }
 

@@ -1,4 +1,4 @@
-// Structure definitions and factory method for redis implementation of IDataCache and IMessageBus
+// Structure definitions and factory method for Valkey implementation of IDataCache and IMessageBus
 //
 
 package facilities
@@ -6,12 +6,12 @@ package facilities
 import (
 	"context"
 	"fmt"
-	"github.com/redis/go-redis/v9"
 	"strings"
 	"time"
 
+	"github.com/valkey-io/valkey-go"
+
 	. "github.com/go-yaaf/yaaf-common/entity"
-	"github.com/go-yaaf/yaaf-common/logger"
 	. "github.com/go-yaaf/yaaf-common/messaging"
 )
 
@@ -23,8 +23,10 @@ func (r *ValkeyAdapter) Publish(messages ...IMessage) error {
 		if bytes, err := messageToRaw(message); err != nil {
 			return err
 		} else {
-			if res := r.rc.Publish(r.ctx, message.Topic(), bytes); res.Err() != nil {
-				return res.Err()
+			cmd := r.rc.B().Publish().Channel(message.Topic()).Message(string(bytes)).Build()
+			res := r.rc.Do(context.Background(), cmd)
+			if res.Error() != nil {
+				return res.Error()
 			}
 		}
 	}
@@ -45,12 +47,20 @@ func (r *ValkeyAdapter) Subscribe(subscriberName string, factory MessageFactory,
 		topicArray = append(topicArray, t)
 	}
 
-	var ps *redis.PubSub
+	var ps *valkey.PubSubHooks
 
 	if isPattern {
-		ps = r.rc.PSubscribe(r.ctx, topics...)
+		cmd := r.rc.B().Psubscribe().Pattern(topics...).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		if res.Error() != nil {
+			return "", res.Error()
+		}
 	} else {
-		ps = r.rc.Subscribe(r.ctx, topics...)
+		cmd := r.rc.B().Subscribe().Channel(topics...).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		if res.Error() != nil {
+			return "", res.Error()
+		}
 	}
 
 	subscriptionId := NanoID()
@@ -63,23 +73,23 @@ func (r *ValkeyAdapter) Subscribe(subscriberName string, factory MessageFactory,
 }
 
 // subscriber is a function running infinite loop to get messages from channel
-func (r *RedisAdapter) subscriber(ps *redis.PubSub, callback SubscriptionCallback, factory MessageFactory) {
+func (r *ValkeyAdapter) subscriber(ps *valkey.PubSubHooks, callback SubscriptionCallback, factory MessageFactory) {
 
-LOOP:
-	for {
-		select {
-		case m := <-ps.Channel():
-			if m == nil {
-				break LOOP
-			}
-			message := factory()
-			if err := Unmarshal([]byte(m.Payload), &message); err != nil {
-				continue
-			} else {
-				go callback(message)
-			}
-		}
-	}
+	//LOOP:
+	//for {
+	//	select {
+	//	case m := <-ps.make(chan interface {})
+	//		if m == nil {
+	//			break LOOP
+	//		}
+	//		message := factory()
+	//		if err := Unmarshal([]byte(m.Payload), &message); err != nil {
+	//			continue
+	//		} else {
+	//			go callback(message)
+	//		}
+	//	}
+	//}
 }
 
 // Unsubscribe with the given subscriber id
@@ -87,18 +97,20 @@ func (r *ValkeyAdapter) Unsubscribe(subscriptionId string) bool {
 	r.Lock()
 	defer r.Unlock()
 
-	if v, ok := r.subs[subscriptionId]; !ok {
-		return false
-	} else {
-		if err := v.ps.Unsubscribe(r.ctx, v.topics...); err != nil {
-			logger.Warn("Unsubscribe error unsubscribe: %s\n", err.Error())
-		}
-		if err := v.ps.Close(); err != nil {
-			logger.Warn("Unsubscribe error closing PubSub: %s\n", err.Error())
-		}
-		delete(r.subs, subscriptionId)
-		return true
-	}
+	//if v, ok := r.subs[subscriptionId]; !ok {
+	//	return false
+	//} else {
+	//	v.ps.
+	//	if err := v.ps.Unsubscribe(r.ctx, v.topics...); err != nil {
+	//		logger.Warn("Unsubscribe error unsubscribe: %s\n", err.Error())
+	//	}
+	//	if err := v.ps.Close(); err != nil {
+	//		logger.Warn("Unsubscribe error closing PubSub: %s\n", err.Error())
+	//	}
+	//	delete(r.subs, subscriptionId)
+	//	return true
+	//}
+	return true
 }
 
 // Push Append one or multiple messages to a queue
@@ -107,8 +119,10 @@ func (r *ValkeyAdapter) Push(messages ...IMessage) error {
 		if bytes, err := messageToRaw(message); err != nil {
 			return err
 		} else {
-			if er := r.rc.LPush(r.ctx, message.Topic(), bytes).Err(); er != nil {
-				return er
+			cmd := r.rc.B().Lpush().Key(message.Topic()).Element(string(bytes)).Build()
+			res := r.rc.Do(context.Background(), cmd)
+			if res.Error() != nil {
+				return res.Error()
 			}
 		}
 	}
@@ -125,24 +139,20 @@ func (r *ValkeyAdapter) Pop(factory MessageFactory, timeout time.Duration, queue
 	}
 
 	if timeout == 0 {
-		if cmd := r.rc.RPop(r.ctx, queue[0]); cmd.Err() != nil {
-			return nil, cmd.Err()
+		cmd := r.rc.B().Rpop().Key(queue[0]).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		if bytes, er := res.AsBytes(); er != nil {
+			return nil, er
 		} else {
-			if bytes, er := cmd.Bytes(); er != nil {
-				return nil, er
-			} else {
-				return rawToMessage(factory, bytes)
-			}
+			return rawToMessage(factory, bytes)
 		}
 	} else {
-		if cmd := r.rc.BRPop(r.ctx, timeout, queue...); cmd.Err() != nil {
-			return nil, cmd.Err()
+		cmd := r.rc.B().Brpop().Key(queue...).Timeout(float64(timeout)).Build()
+		res := r.rc.Do(context.Background(), cmd)
+		if bytes, err := res.AsBytes(); err != nil {
+			return nil, err
 		} else {
-			if result, err := cmd.Result(); err != nil {
-				return nil, err
-			} else {
-				return rawToMessage(factory, []byte(result[1]))
-			}
+			return rawToMessage(factory, bytes)
 		}
 	}
 }
@@ -169,13 +179,13 @@ func (r *ValkeyAdapter) CreateConsumer(subscription string, mf MessageFactory, t
 		topicArray = append(topicArray, t)
 	}
 
-	var ps *redis.PubSub
+	var ps *valkey.PubSubHooks
 
-	if isPattern {
-		ps = r.rc.PSubscribe(r.ctx, topics...)
-	} else {
-		ps = r.rc.Subscribe(r.ctx, topics...)
-	}
+	//if isPattern {
+	//	ps = r.rc.PSubscribe(r.ctx, topics...)
+	//} else {
+	//	ps = r.rc.Subscribe(r.ctx, topics...)
+	//}
 
 	return &consumer{
 		ps:        ps,
@@ -190,7 +200,7 @@ func (r *ValkeyAdapter) CreateConsumer(subscription string, mf MessageFactory, t
 // region Producer actions ---------------------------------------------------------------------------------------------
 
 type producer struct {
-	rc    *redis.Client
+	rc    valkey.Client
 	topic string
 }
 
@@ -205,8 +215,9 @@ func (p *producer) Publish(messages ...IMessage) error {
 		if bytes, err := messageToRaw(message); err != nil {
 			return err
 		} else {
-			if res := p.rc.Publish(context.Background(), message.Topic(), bytes); res.Err() != nil {
-				return res.Err()
+			cmd := p.rc.B().Publish().Channel(message.Topic()).Message(string(bytes)).Build()
+			if res := p.rc.Do(context.Background(), cmd); res.Error() != nil {
+				return res.Error()
 			}
 		}
 	}
@@ -218,7 +229,7 @@ func (p *producer) Publish(messages ...IMessage) error {
 // region Consumer methods  --------------------------------------------------------------------------------------------
 
 type consumer struct {
-	ps        *redis.PubSub
+	ps        *valkey.PubSubHooks
 	factory   MessageFactory
 	isPattern bool
 	topics    []string
@@ -231,11 +242,12 @@ func (p *consumer) Close() error {
 		return nil
 	}
 
-	if p.isPattern {
-		return p.ps.PUnsubscribe(context.Background(), p.topics...)
-	} else {
-		return p.ps.Unsubscribe(context.Background(), p.topics...)
-	}
+	//if p.isPattern {
+	//	return p.ps.PUnsubscribe(context.Background(), p.topics...)
+	//} else {
+	//	return p.ps.Unsubscribe(context.Background(), p.topics...)
+	//}
+	return nil
 }
 
 // Read message from topic, blocks until a new message arrive or until timeout expires
@@ -256,23 +268,23 @@ func (p *consumer) Read(timeout time.Duration) (IMessage, error) {
 		timeout = time.Hour * 24
 	}
 
-LOOP:
-	for {
-		select {
-		case m := <-p.ps.Channel():
-			if m == nil {
-				break LOOP
-			}
-			message := p.factory()
-			if err := Unmarshal([]byte(m.Payload), &message); err != nil {
-				return nil, err
-			} else {
-				return message, nil
-			}
-		case <-time.After(timeout):
-			return nil, fmt.Errorf("read timeout")
-		}
-	}
+	//LOOP:
+	//	for {
+	//		select {
+	//		case m := <-p.ps.Channel():
+	//			if m == nil {
+	//				break LOOP
+	//			}
+	//			message := p.factory()
+	//			if err := Unmarshal([]byte(m.Payload), &message); err != nil {
+	//				return nil, err
+	//			} else {
+	//				return message, nil
+	//			}
+	//		case <-time.After(timeout):
+	//			return nil, fmt.Errorf("read timeout")
+	//		}
+	//	}
 	return nil, fmt.Errorf("read timeout")
 }
 

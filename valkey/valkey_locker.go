@@ -1,85 +1,103 @@
-// Redis based implementation of IDataCache interface
+// Valkey based implementation of IDataCache interface
 //
 
 package facilities
 
 import (
 	"context"
-	"errors"
-	"github.com/redis/go-redis/v9"
-	"strconv"
+	"fmt"
 	"time"
+
+	"github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/valkeylock"
+
+	. "github.com/go-yaaf/yaaf-common/database"
 )
 
-var (
-	luaRefresh = valkey.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 0 end`)
-	luaRelease = valkey.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`)
-	luaPTTL    = valkey.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pttl", KEYS[1]) else return -3 end`)
-)
+// This implementation of distributed locker based on Valkey
+// TODO: Add implementation for locker TTL
 
-var (
-	// ErrNotObtained is returned when a lock cannot be obtained.
-	ErrNotObtained = errors.New("redislock: not obtained")
-
-	// ErrLockNotHeld is returned when trying to release an inactive lock.
-	ErrLockNotHeld = errors.New("redislock: lock not held")
-)
-
-// Locker represents an obtained, distributed lock.
-type Locker struct {
-	rc    *redis.Client
-	key   string
-	token string
+// LockerImpl represents an obtained, distributed lock.
+type LockerImpl struct {
+	locker  valkeylock.Locker
+	key     string
+	token   string
+	ctx     context.Context
+	ctxFunc context.CancelFunc
+	ttlFunc context.CancelFunc
 }
 
-// Key returns the redis key used by the lock.
-func (l *Locker) Key() string {
+func createNewLocker(URI string, key string, ttl time.Duration) (ILocker, error) {
+	options, er := valkey.ParseURL(URI)
+	if er != nil {
+		return nil, er
+	}
+
+	locker, err := valkeylock.NewLocker(valkeylock.LockerOption{
+		ClientOption:   options,
+		KeyMajority:    1,    // Use KeyMajority=1 if you have only one Valkey instance. Also make sure that all your `Locker`s share the same KeyMajority.
+		NoLoopTracking: true, // Enable this to have better performance if all your Valkey are >= 7.0.5.
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := &LockerImpl{key: key}
+
+	// set context
+	lockerCtx := context.Background()
+	if ttl > 0 {
+		lockerCtx, result.ttlFunc = context.WithTimeout(lockerCtx, ttl)
+	}
+
+	ctx, cancel, err := locker.WithContext(lockerCtx, key)
+	if err != nil {
+		return nil, err
+	}
+
+	result.locker = locker
+	result.ctx = ctx
+	result.ctxFunc = cancel
+
+	return result, nil
+}
+
+// Key returns the locker key used by the lock.
+func (l *LockerImpl) Key() string {
 	return l.key
 }
 
 // Token returns the token value set by the lock.
-func (l *Locker) Token() string {
+func (l *LockerImpl) Token() string {
 	return l.token
 }
 
 // TTL returns the remaining time-to-live. Returns 0 if the lock has expired.
-func (l *Locker) TTL(ctx context.Context) (time.Duration, error) {
-	res, err := luaPTTL.Run(ctx, l.rc, []string{l.key}, l.token).Result()
-	if err == redis.Nil {
-		return 0, nil
-	} else if err != nil {
-		return 0, err
-	}
-
-	if num := res.(int64); num > 0 {
-		return time.Duration(num) * time.Millisecond, nil
-	}
-	return 0, nil
+func (l *LockerImpl) TTL(ctx context.Context) (time.Duration, error) {
+	// TODO: GET TTL implementation
+	return 0, fmt.Errorf("not yet implemented")
 }
 
 // Refresh extends the lock with a new TTL.
-func (l *Locker) Refresh(ctx context.Context, ttl time.Duration) error {
-	ttlVal := strconv.FormatInt(int64(ttl/time.Millisecond), 10)
-	status, err := luaRefresh.Run(ctx, l.rc, []string{l.key}, l.token, ttlVal).Result()
-	if err != nil {
-		return err
-	} else if status == int64(1) {
-		return nil
-	}
-	return ErrNotObtained
+func (l *LockerImpl) Refresh(ctx context.Context, ttl time.Duration) error {
+
+	// TODO: Extend TTL implementation
+	return fmt.Errorf("not yet implemented")
 }
 
 // Release manually releases the lock.
-func (l *Locker) Release(ctx context.Context) error {
-	res, err := luaRelease.Run(ctx, l.rc, []string{l.key}, l.token).Result()
-	if errors.Is(err, redis.Nil) {
-		return ErrLockNotHeld
-	} else if err != nil {
-		return err
+func (l *LockerImpl) Release(ctx context.Context) error {
+
+	if l.ctxFunc != nil {
+		l.ctxFunc()
 	}
 
-	if i, ok := res.(int64); !ok || i != 1 {
-		return ErrLockNotHeld
+	if l.ttlFunc != nil {
+		l.ttlFunc()
+	}
+
+	if l.locker != nil {
+		l.locker.Close()
 	}
 	return nil
 }
