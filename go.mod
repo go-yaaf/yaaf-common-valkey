@@ -2,8 +2,6 @@ module github.com/go-yaaf/yaaf-common-valkey
 
 go 1.21
 
-toolchain go1.22.2
-
 require (
 	github.com/go-yaaf/yaaf-common v1.2.114
 	github.com/stretchr/testify v1.9.0
