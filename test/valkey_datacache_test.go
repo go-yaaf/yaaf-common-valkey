@@ -104,7 +104,7 @@ func (s *ValkeyCacheTestSuite) TestDataCacheSet() {
 
 	// Get data from cache
 	if result, err := s.cache.Get(NewHero, heroId); err != nil {
-		s.T().Errorf(err.Error())
+		s.T().Errorf("%s", err.Error())
 	} else {
 		fmt.Println(result.ID(), result.NAME())
 		require.Equal(s.T(), hero.NAME(), result.NAME(), "not expected result")
